@@ -150,6 +150,38 @@ Create `documind/.env` from `.env.example`:
 | `POST` | `/query/` | Ask a question |
 | `GET` | `/query/history` | Get query history |
 
+## Benchmarks
+
+Tested on a single PDF document (~2 pages), Mistral 7B Instruct via Ollama, CPU cross-encoder reranking, RTX GPU for Ollama inference.
+
+### Query latency
+
+| Query type | Example | Latency |
+|---|---|---|
+| Simple | "What is this document about?" | 27.3s (cold) |
+| Specific fact | "What accuracy did the model achieve?" | 5.8s |
+| Complex | "Summarise all the projects" | 6.3s |
+
+Latency is almost entirely Ollama generation time. Retrieval breakdown:
+
+| Stage | Component | Time |
+|---|---|---|
+| Embedding | `all-MiniLM-L6-v2` (384-dim) | ~50ms |
+| FAISS search | `IndexFlatL2`, exact L2, k×3 candidates | <10ms |
+| Cross-encoder rerank | `ms-marco-MiniLM-L-6-v2`, CPU | ~200–400ms |
+| Generation | Mistral 7B Instruct via Ollama | 5–25s |
+
+First query after server start is slower (~27s) due to Ollama model loading into VRAM. Subsequent queries are warm (~5–8s for short answers).
+
+### Document processing
+
+| Stage | Time (2-page PDF) |
+|---|---|
+| Parse + chunk | <1s |
+| Embed all chunks | 1–3s |
+| FAISS index write | <1s |
+| **Total ingestion** | **~5s** |
+
 ## Project Structure
 
 ```
