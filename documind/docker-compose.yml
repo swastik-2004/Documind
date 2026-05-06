@@ -1,12 +1,70 @@
 version: '3.8'
+
 services:
   postgres:
     image: postgres:15
     environment:
       POSTGRES_PASSWORD: password
+      POSTGRES_DB: documind
     ports:
       - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   redis:
     image: redis:6
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/documind
+      REDIS_URL: redis://redis:6379/0
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-mistral:7b-instruct}
+    volumes:
+      - uploads:/app/uploads
+      - faiss_indexes:/app/faiss_indexes
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: celery -A app.workers.ingestion_worker worker --loglevel=info
+    environment:
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/documind
+      REDIS_URL: redis://redis:6379/0
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-mistral:7b-instruct}
+    volumes:
+      - uploads:/app/uploads
+      - faiss_indexes:/app/faiss_indexes
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  uploads:
+  faiss_indexes:
