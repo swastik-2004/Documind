@@ -5,11 +5,11 @@ A full-stack RAG (Retrieval-Augmented Generation) application that lets you uplo
 ## Features
 
 - **Document upload** — PDF and DOCX support with async background processing
-- **RAG queries** — semantic search over your documents, answered by a local LLM
+- **Two-stage retrieval** — bi-encoder FAISS search followed by cross-encoder reranking
 - **Multi-document search** — queries run across all your ready documents at once
 - **Query history** — every question and answer is stored and accessible
 - **JWT authentication** — per-user document isolation with access + refresh tokens
-- **Fully local** — embeddings and LLM inference run on your machine via Ollama
+- **Fully local** — embeddings, reranker, and LLM inference all run on your machine
 
 ## Tech Stack
 
@@ -17,8 +17,9 @@ A full-stack RAG (Retrieval-Augmented Generation) application that lets you uplo
 - FastAPI — REST API
 - PostgreSQL — document metadata, users, query history
 - Redis + Celery — async document ingestion queue
-- FAISS — vector similarity search
-- sentence-transformers (`all-MiniLM-L6-v2`) — document embeddings
+- FAISS (`IndexFlatL2`) — exact L2 vector search
+- sentence-transformers (`all-MiniLM-L6-v2`) — bi-encoder embeddings (384-dim)
+- sentence-transformers (`ms-marco-MiniLM-L-6-v2`) — cross-encoder reranker (PyTorch)
 - Ollama (Mistral 7B Instruct) — answer generation
 - Alembic — database migrations
 
@@ -31,9 +32,34 @@ A full-stack RAG (Retrieval-Augmented Generation) application that lets you uplo
 ## Architecture
 
 ```
-Upload → Celery Worker → Parse → Chunk → Embed → FAISS index
-Query  → Embed question → FAISS search → Retrieve chunks → Ollama → Answer
+Upload → Celery Worker → Parse → Chunk (512 chars, 64 overlap) → Embed (384-dim) → FAISS index
+
+Query  → Embed question
+       → FAISS search (top 3k candidates, bi-encoder)
+       → Cross-encoder rerank (PyTorch, ms-marco)
+       → Top k chunks → Ollama prompt → Answer
 ```
+
+### Chunking Strategy
+
+Documents are split using `RecursiveCharacterTextSplitter`:
+
+| Parameter | Value | Reason |
+|---|---|---|
+| `chunk_size` | 512 chars | Fits within MiniLM-L6-v2's 256-token context without truncation |
+| `chunk_overlap` | 64 chars | ~12% overlap preserves sentence continuity across boundaries |
+| `length_function` | `len` | Character count, consistent across languages |
+
+The recursive splitter tries to split on `\n\n`, then `\n`, then spaces, then characters — preserving semantic boundaries wherever possible.
+
+### Two-Stage Retrieval
+
+| Stage | Model | Speed | Accuracy |
+|---|---|---|---|
+| Bi-encoder (FAISS) | `all-MiniLM-L6-v2` | Fast — encodes query once, dot-product over index | Approximate |
+| Cross-encoder (reranker) | `ms-marco-MiniLM-L-6-v2` | Slower — scores every (query, chunk) pair jointly | High |
+
+FAISS retrieves `k × 3` candidates; the cross-encoder reranks them and returns the top `k`. This is the standard two-stage retrieval pattern used in production search systems.
 
 ## Prerequisites
 
@@ -106,6 +132,7 @@ Create `documind/.env` from `.env.example`:
 | `REFRESH_TOKEN_EXPIRE_DAYS` | Refresh token TTL | `7` |
 | `OLLAMA_BASE_URL` | Ollama API URL | `http://localhost:11434` |
 | `OLLAMA_MODEL` | Model name | `mistral:7b-instruct` |
+| `RERANKER_MODEL` | Cross-encoder model | `cross-encoder/ms-marco-MiniLM-L-6-v2` |
 | `UPLOAD_DIR` | Directory for uploaded files | `uploads/` |
 | `FAISS_INDEX_DIR` | Directory for FAISS indexes | `faiss_indexes/` |
 
@@ -133,7 +160,7 @@ Documind/
 │   │   │   └── routes/        # auth, documents, query
 │   │   ├── core/
 │   │   │   ├── ingestion/     # parser, chunker, embedder
-│   │   │   ├── retrieval/     # FAISS store + retriever
+│   │   │   ├── retrieval/     # FAISS store, retriever, cross-encoder reranker
 │   │   │   └── generation/    # Ollama client + prompt builder
 │   │   ├── models/            # SQLAlchemy ORM models
 │   │   ├── schemas/           # Pydantic request/response schemas
